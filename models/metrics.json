@@ -1,0 +1,28 @@
+{
+  "CGM only": {
+    "roc_auc": 0.782,
+    "pr_auc": 0.5055,
+    "precision_at_0p5": 0.6681,
+    "recall_at_0p5": 0.2022
+  },
+  "CGM + wearable": {
+    "roc_auc": 0.9483,
+    "pr_auc": 0.8198,
+    "precision_at_0p5": 0.7442,
+    "recall_at_0p5": 0.7081
+  },
+  "CGM + wearable + EHR (twin)": {
+    "roc_auc": 0.9582,
+    "pr_auc": 0.8532,
+    "precision_at_0p5": 0.7937,
+    "recall_at_0p5": 0.7146
+  },
+  "_meta": {
+    "n_train": 248609,
+    "n_test": 83958,
+    "train_patients": 225,
+    "test_patients": 75,
+    "positive_rate": 0.1934,
+    "task": "P(glucose > 180 mg/dL within next 2h | currently <= 180)"
+  }
+}
