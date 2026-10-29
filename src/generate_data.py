@@ -11,6 +11,8 @@ derived from the EHR (BMI, HbA1c, TCF7L2 risk alleles, metformin), reduced by
 post-meal walking, and raised by poor sleep. The twin model must therefore
 fuse EHR + wearable streams to predict excursions.
 """
+import os
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # always run from project root
 import argparse
 import os
 
@@ -29,6 +31,8 @@ def make_ehr(n, rng):
     family_history = rng.binomial(1, 0.45, n)
     tcf7l2 = rng.binomial(2, 0.3, n)  # risk alleles (0-2), TCF7L2 rs7903146
     metformin = rng.binomial(1, 0.7, n)
+    secretagogue = rng.binomial(1, 0.3, n)  # sulfonylurea / insulin: hypoglycaemia risk
+    drug_strength = rng.uniform(0.5, 1.3, n)  # latent, NOT in EHR
     egfr = np.clip(rng.normal(95 - 0.5 * (age - 30), 12), 30, 130)
     sbp = np.clip(rng.normal(128 + 0.2 * (age - 50), 12), 95, 190)
     fasting = np.clip(0.7 * (28.7 * hba1c - 46.7) + rng.normal(0, 6, n), 80, 250)
@@ -44,10 +48,12 @@ def make_ehr(n, rng):
             family_history=family_history,
             tcf7l2_risk_alleles=tcf7l2,
             on_metformin=metformin,
+            on_secretagogue=secretagogue,
             egfr=egfr.round(0),
             sbp=sbp.round(0),
         )
     )
+    ehr.attrs['drug_strength'] = drug_strength
     return ehr
 
 
@@ -73,7 +79,7 @@ def activity_profile():
     return w / w.sum()
 
 
-def simulate_patient_full(row, days, rng):
+def simulate_patient_full(row, days, rng, drug_strength=0.0):
     """Single-pass simulator that keeps meal timing for the excursion model."""
     mult = insulin_resistance_multiplier(row, rng)
     n = days * STEPS_PER_DAY
@@ -99,11 +105,12 @@ def simulate_patient_full(row, days, rng):
             slot = int(h * 4)
             carbs = max(carbs, 15)
             walked = rng.random() < 0.35
+            skipped = rng.random() < 0.12  # meal skipped (drug dose still taken)
             if walked:
                 for k in (slot + 1, slot + 2):
                     if k < STEPS_PER_DAY:
                         s[k] += 700
-            meal_events.append((d * STEPS_PER_DAY + slot, carbs, walked, d))
+            meal_events.append((d * STEPS_PER_DAY + slot, carbs, walked, d, skipped))
         steps[d * STEPS_PER_DAY:(d + 1) * STEPS_PER_DAY] = s
 
     glucose = np.zeros(n)
@@ -118,19 +125,29 @@ def simulate_patient_full(row, days, rng):
     t = np.arange(0, 12) * 15.0  # 3h response window, minutes
     tau = 60.0
     curve = (t / tau) * np.exp(1 - t / tau)
-    for slot, carbs, walked, d in meal_events:
+    t2 = np.arange(0, 20) * 15.0  # 5 h window for delayed drug effect
+    curve2 = (t2 / 120.0) * np.exp(1 - t2 / 120.0)
+    for slot, carbs, walked, d, skipped in meal_events:
         sleep_pen = 1.0 + 0.10 * max(0.0, 6.5 - sleep_hours[d])
-        amp = 0.9 * carbs * mult * sleep_pen * (0.75 if walked else 1.0)
+        eaten = 0.0 if skipped else carbs
+        amp = 0.9 * eaten * mult * sleep_pen * (0.75 if walked else 1.0)
         for k, c in enumerate(curve):
             if slot + k < n:
                 glucose[slot + k] += amp * c
+        if drug_strength > 0:
+            # sulfonylurea / insulin dose sized for the *planned* meal; acts later.
+            # Walking after the dose adds extra glucose uptake (exercise).
+            dip = 0.60 * carbs * drug_strength * (1.25 if walked else 1.0)
+            for k, c in enumerate(curve2):
+                if slot + k < n:
+                    glucose[slot + k] -= dip * c
 
     # AR(1) sensor/physiology noise
     noise = np.zeros(n)
     e = rng.normal(0, 3.0, n)
     for i in range(1, n):
         noise[i] = 0.8 * noise[i - 1] + e[i]
-    glucose = np.clip(glucose + noise, 40, 400)
+    glucose = np.clip(glucose + noise, 40, 400)  # CGM range ~40-400
 
     hr = resting_hr + 0.03 * steps + rng.normal(0, 3, n)
     hr = np.clip(hr, 45, 170)
@@ -153,7 +170,8 @@ def main():
 
     wear, sleep = [], []
     for row in ehr.itertuples():
-        g, s, h, sl = simulate_patient_full(row, a.days, rng)
+        ds = float(ehr.attrs['drug_strength'][row.patient_id]) if row.on_secretagogue else 0.0
+        g, s, h, sl = simulate_patient_full(row, a.days, rng, ds)
         wear.append(
             pd.DataFrame(
                 dict(
